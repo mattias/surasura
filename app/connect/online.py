@@ -125,7 +125,7 @@ def of(language, item, pairing=None):
     url, _why = play.online_link(language, rel, pairing)
     folder, name = os.path.basename(os.path.dirname(rel)), os.path.splitext(os.path.basename(rel))[0]
     return {"site": item["source_type"], "url": url, "names": [folder or name, name],
-            "captions": _captions(language, rel)}
+            "captions": _captions(language, rel), "rel": rel}
 
 
 def _captions(language, rel):
@@ -139,6 +139,71 @@ def _captions(language, rel):
     except (OSError, ValueError):
         return None
     return analyzer.caption_kind(head)
+
+
+def keep_transcript(language, rel, subtitle):
+    """Mattias's ask (3.0.10: "the subtitles in New Arrivals may be wrong — then it wants words that aren't even in
+    the video"): the library's transcript of a video at `rel`, made from captions no person wrote, written over with
+    Anki Miner's whisper transcription of its audio (`subtitle`, the fetch's SRT) -> True; else False, the transcript
+    as it was. Its header kept, its caption kind now `analyzer.TRANSCRIBED`; its body in its own form (a cue a line
+    with its time, else one paragraph); its cue sidecar's times from the transcription too (each sentence opens its
+    own moment). Never a person's captions, never a file outside the language's data folder, never one already
+    transcribed. The old transcript copied into the data folder's `.trash` first (`sources.put_copy`)."""
+    from app import analyzer, sources
+    from app.connect import lineup
+    from app.path_utils import SIDECAR_SUFFIX, get_data_path
+    data_dir = get_data_path(language)
+    parts = str(rel or "").replace("\\", "/").split("/")
+    if not rel or ".." in parts or not parts[-1].lower().endswith(".txt"):
+        return False
+    full = os.path.join(data_dir, *parts)
+    home = os.path.normcase(os.path.realpath(data_dir)).rstrip("\\/") + os.sep
+    if not os.path.normcase(os.path.realpath(full)).startswith(home):
+        return False
+    try:
+        with open(full, encoding="utf-8") as f:
+            text = f.read()
+    except (OSError, UnicodeDecodeError):
+        return False
+    kind = analyzer.caption_kind(text)
+    if kind not in analyzer.AUTO_CAPTIONS or kind == analyzer.TRANSCRIBED:
+        return False
+    cues = []
+    for start, _end, line in lineup.srt_cues(subtitle):
+        line = re.sub(r"<[^>]+>", "", " ".join(str(line).split())).strip()
+        if line and start is not None:
+            cues.append((int(start), line))
+    if not cues:
+        return False
+    lines = text.split("\n", 6)
+    timed = bool(analyzer._TRANSCRIPT_TIME_RE.search(lines[6] if len(lines) == 7 else ""))
+    shown = [(f"[{s // 3600:02}:{s // 60 % 60:02}:{s % 60:02}] {t}" if timed else t, s) for s, t in cues]
+    head = lines[:6]
+    head[2] = re.sub(r"\([^()]*\)\s*$", f"({analyzer.TRANSCRIBED})", head[2].rstrip())
+    body = ("\n" if timed else " ").join(t for t, _s in shown)
+    part = full + ".transcribed.part"
+    try:
+        with open(part, "w", encoding="utf-8", newline="") as f:
+            f.write("\n".join(head) + "\n" + body + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError:
+        sources._drop(part)
+        return False
+    if not sources.put_copy(data_dir, full, part):
+        return False
+    side = os.path.splitext(full)[0] + SIDECAR_SUFFIX
+    try:                                    # best-effort, as the downloader's own: the transcript is what counts
+        with open(side, encoding="utf-8") as f:
+            payload = json.load(f)
+        if isinstance(payload, dict):
+            payload["cues"] = [[t, s] for t, s in shown]
+            with open(side + ".part", "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(side + ".part", side)
+    except (OSError, ValueError):
+        log.info("Connect: %s's cue times couldn't be written; its transcript is the transcription's", rel)
+    return True
 
 
 def subtitle_source(web):

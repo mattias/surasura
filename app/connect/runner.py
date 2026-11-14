@@ -2731,6 +2731,14 @@ class Steps:
             self._anki_miner_held(lang).clear()
             raise _miner_wait_or_needs(e, self.url) from None
         self._fetched = dict(getattr(self, "_fetched", {}), **{str(job["id"]): got})
+        if online.subtitle_source(web) == "transcribe" and web.get("rel"):
+            # Mattias's ask (3.0.10): the library's transcript, made from YouTube's machine captions, becomes the
+            # transcription the cards are cut from — the next Generate counts the words the video really holds
+            try:
+                if online.keep_transcript(lang, web["rel"], got[1]):
+                    log.info("Connect: job %s: its transcript is now Anki Miner's transcription", job["id"])
+            except Exception:
+                log.warning("Connect: job %s: its transcript couldn't take the transcription", job["id"], exc_info=True)
         return got
 
     def drop_online(self, job):
