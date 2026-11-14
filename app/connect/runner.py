@@ -2715,7 +2715,7 @@ class Steps:
             return False
         try:
             got = online.fetch(miner, setup[1], lang, job["id"], web["url"], on_progress=on_progress,
-                               should_end=should_end)
+                               should_end=should_end, source=online.subtitle_source(web))
         except stopping.Stopped:
             if staged:
                 raise Wait(STOPPED_FOR_UPDATE, look=False) from None

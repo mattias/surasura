@@ -11,6 +11,10 @@ A YouTube title in the library is only its transcript (the downloader's `.txt` a
   subtitle the job picks its words from and Anki Miner cuts from: they came down with that video, timed to it (the
   library's transcript keeps whole seconds only). Its quality is Anki Miner's own (`YOUTUBE_MAX_HEIGHT` 720, best
   audio); the card audio is the profile's own bitrate, never lowered here.
+- **Captions no person wrote** (Mattias's ask, 3.0.10: "I don't want YouTube's auto-generated subs, they are never
+  good"): a video whose library transcript came from YouTube's speech recognition or its machine translation (the
+  header's `Captions: ja (native auto)`) is fetched with `youtube_subtitle_source` "transcribe" instead — Anki
+  Miner's own whisper model makes its subtitle from the video's audio (`subtitle_source`).
 - **yt-dlp:** the YouTube downloader's own binary (`modules/youtube_downloader/ytdlp_manager`, kept up to date by it)
   is put on Anki Miner's PATH for the call; one Anki Miner downloaded itself comes first (its resolver's order).
 - **Gone after** (`drop`): as soon as Anki Miner has made the job's clips and pictures, and whenever the job stops
@@ -110,15 +114,40 @@ def is_online(item):
 
 def of(language, item, pairing=None):
     """What a job needs of an online item -> {"site", "url" (or None: no link kept), "names": [the transcript's folder,
-    its name]} — the names its cards' Source carries (`runfile.episode(names=)`), so 順's one source-name rule ties
-    them to the transcript as it ties any card to its file; None for any other item. Never writes."""
+    its name], "captions": the kind its transcript's header names (`analyzer.caption_kind`: "manual", "native auto",
+    "auto-translated"), or None} — the names its cards' Source carries (`runfile.episode(names=)`), so 順's one
+    source-name rule ties them to the transcript as it ties any card to its file; None for any other item. Never
+    writes."""
     if not is_online(item):
         return None
     from app.services import play
     rel = str(item.get("rel_path") or "").replace("\\", "/")
     url, _why = play.online_link(language, rel, pairing)
     folder, name = os.path.basename(os.path.dirname(rel)), os.path.splitext(os.path.basename(rel))[0]
-    return {"site": item["source_type"], "url": url, "names": [folder or name, name]}
+    return {"site": item["source_type"], "url": url, "names": [folder or name, name],
+            "captions": _captions(language, rel)}
+
+
+def _captions(language, rel):
+    """The caption kind the transcript at `rel` (in the language's data folder) names in its header, or None (no such
+    header, or unreadable): its first lines only."""
+    from app import analyzer
+    from app.path_utils import get_data_path
+    try:
+        with open(os.path.join(get_data_path(language), *rel.split("/")), encoding="utf-8", errors="replace") as f:
+            head = f.read(4096)
+    except (OSError, ValueError):
+        return None
+    return analyzer.caption_kind(head)
+
+
+def subtitle_source(web):
+    """Anki Miner's `youtube_subtitle_source` for a video (`of`'s) -> "transcribe" when the library's transcript of it
+    came from captions no person wrote (`analyzer.AUTO_CAPTIONS`: YouTube's speech recognition, or its machine
+    translation) — Anki Miner then transcribes the video's own audio with its whisper model, never YouTube's
+    recognizer; else "captions" (a person's captions, or a transcript that names none)."""
+    from app import analyzer
+    return "transcribe" if (web or {}).get("captions") in analyzer.AUTO_CAPTIONS else "captions"
 
 
 def folder():
@@ -236,11 +265,13 @@ def plain(message, transient=False):
     return FAILED.format(why=short[:200]), False
 
 
-def fetch(exe, profile, language, job_id, url, on_progress=None, should_end=None, env=None):
+def fetch(exe, profile, language, job_id, url, on_progress=None, should_end=None, env=None, source="captions"):
     """Anki Miner's `fetch` of one YouTube video for job `job_id` -> (video, subtitle): both inside `place(job_id)`.
     Raises Trouble (plain words), `stopping.Stopped` (the job's *Stop* — the program ended within a second —, or
     `should_end()` true, asked every UPDATE_EVERY polls: an update staged, ended within a few seconds, its folder left for the caller's `drop`), and AnkiMinerError for a call
-    with no verdict (absent, crashed, timeout). `on_progress(percent)`: the download's own percent, as it goes."""
+    with no verdict (absent, crashed, timeout). `on_progress(percent)`: the download's own percent, as it goes.
+    `source`: Anki Miner's `youtube_subtitle_source` — "captions" (YouTube's: a person's first), or "transcribe" (its
+    whisper model on the video's audio: `subtitle_source`)."""
     from app.connect import anki_miner
     until = youtube_hold.held()
     if until:                               # (Yt-B) YouTube's bot check holds every YouTube call: nothing asked
@@ -251,7 +282,7 @@ def fetch(exe, profile, language, job_id, url, on_progress=None, should_end=None
     here = folder()
     os.makedirs(here, exist_ok=True)
     data = {"schema": 1, "run_dir": here, "language": language,
-            "episodes": [{"run_id": rid, "youtube_url": url, "youtube_subtitle_source": "captions",
+            "episodes": [{"run_id": rid, "youtube_url": url, "youtube_subtitle_source": source,
                           "youtube_align_captions": False}]}
     if profile:
         data["profile"] = profile

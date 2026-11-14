@@ -279,10 +279,50 @@ def test_online_of_reads_the_link_and_names_from_the_item(monkeypatch):
     monkeypatch.setattr(play, "online_link", lambda language, rel, record=None: (LINK, None))
     item = {"source_type": "youtube", "rel_path": "Processed/日本語の練習/会話 第1話 [dQw4w9WgXcQ].txt"}
     assert online.of("ja", item) == {"site": "youtube", "url": LINK,
-                                     "names": ["日本語の練習", "会話 第1話 [dQw4w9WgXcQ]"]}
+                                     "names": ["日本語の練習", "会話 第1話 [dQw4w9WgXcQ]"], "captions": None}
     assert online.of("ja", {"source_type": "subtitle", "rel_path": "Library/Show/01.srt"}) is None
     assert online.of("ja", {"source_type": "youtube", "rel_path": "会話 [dQw4w9WgXcQ].txt"})["names"] == \
         ["会話 [dQw4w9WgXcQ]", "会話 [dQw4w9WgXcQ]"]
+
+
+# --- captions no person wrote: Anki Miner transcribes the video instead (Mattias's ask, 3.0.10) ---------------------- #
+def _transcript(kind):
+    """The YouTube downloader's transcript as `build_text` writes it: its six header lines, then the cues."""
+    return "\n".join(["誰から何も言われずに1人で英語学習継続できるようになる方法", "ユートのチャンネル | 2024-05-01 | 41:12",
+                      f"Captions: ja ({kind})", LINK, "", "-" * 60,
+                      "[00:00:00] 今から皆さんにめちゃくちゃ難しい質問します"])
+
+
+@pytest.mark.parametrize("kind,source", (("manual", "captions"), ("native auto", "transcribe"),
+                                         ("auto-translated", "transcribe")))
+def test_a_videos_captions_no_person_wrote_are_transcribed_by_anki_miner_instead(monkeypatch, tmp_path, kind, source):
+    """"I don't want YouTube's auto-generated subs, they are never good": a transcript whose header says YouTube's own
+    speech recognition (or its machine translation) made it has Anki Miner transcribe the video's audio; a person's
+    captions are taken as before."""
+    from app import path_utils
+    from app.services import play
+    rel = "Processed/ユートのチャンネル - 誰から何も言われずに [pitFobM6z80].txt"
+    (tmp_path / "Processed").mkdir()
+    (tmp_path / rel).write_text(_transcript(kind), encoding="utf-8")
+    monkeypatch.setattr(path_utils, "get_data_path", lambda language: str(tmp_path))
+    monkeypatch.setattr(play, "online_link", lambda language, rel, record=None: (LINK, None))
+    web = online.of("ja", {"source_type": "youtube", "rel_path": rel})
+    assert web["captions"] == kind
+    assert online.subtitle_source(web) == source
+
+
+def test_a_transcript_naming_no_captions_or_gone_keeps_youtubes_captions():
+    assert online.subtitle_source({"captions": None}) == "captions"
+    assert online.subtitle_source({}) == "captions"
+    assert online.subtitle_source(None) == "captions"
+
+
+@pytest.mark.parametrize("kind,source", (("native auto", "transcribe"), ("manual", "captions"), (None, "captions")))
+def test_steps_download_asks_anki_miner_for_its_transcription_of_a_video_with_auto_captions(steps, fake_miner, kind,
+                                                                                             source):
+    steps.download("ja", JOB, dict(WEB, captions=kind))
+    call = next(c for c in fake_miner.calls() if c.get("episodes"))
+    assert call["episodes"][0]["youtube_subtitle_source"] == source
 
 
 # --- the window: its row's words while it downloads; never *No video* ------------------------------------------- #
