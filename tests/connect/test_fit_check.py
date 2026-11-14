@@ -425,3 +425,50 @@ def test_an_error_with_no_reason_or_another_kind_of_reason_waits_and_never_raise
     answer = dict(REAL, outcome="ERROR", segments=[], offset=None)
     del answer["reason"]
     assert fit_check.fit(None, VIDEO, SUBTITLE, tsubasa="tsubasa", run=_tsubasa(answer), trust=True)[0] ==         fit_check.NOT_TIMED
+
+
+# --- RUNBOOK B6: tsubasa's --vad (Tsubasa-sync #4) --------------------------------------------------------------------
+
+def _speech_files(tmp_path, library=True, vad=("ggml-silero-v6.2.0.bin",), asr=("ggml-large-v3-q5_0.bin",)):
+    lib, models = tmp_path / "AnkiMiner" / "_internal", tmp_path / "ggml"
+    lib.mkdir(parents=True)
+    models.mkdir()
+    if library:
+        (lib / "whisper.dll").write_bytes(b"")
+    for name in (*vad, *asr):
+        (models / name).write_bytes(b"")
+    return str(lib), str(models)
+
+
+def test_tsubasa_measures_a_raw_video_by_its_speech_only_when_whisper_and_both_models_are_here(tmp_path, monkeypatch):
+    """Mattias's Dr. Stone Stone Wars (BD rips, no subtitle track): `--vad` and the three places tsubasa reads its speech
+    files from, when Anki Miner's whisper.cpp and both ggml models are on this PC; anything missing: tsubasa as before."""
+    monkeypatch.setattr(fit_check.sys, "platform", "win32")
+    lib, models = _speech_files(tmp_path)
+    args, env = fit_check.speech_setup(lib, models)
+    assert args == ["--vad"]
+    assert env["TSUBASA_WHISPER"] == lib
+    assert env["TSUBASA_VAD_MODEL"].endswith("ggml-silero-v6.2.0.bin")
+    assert env["TSUBASA_ASR_MODEL"].endswith("ggml-large-v3-q5_0.bin")
+    for case, kw in (("no whisper.dll", {"library": False}), ("no Silero", {"vad": ()}), ("no whisper model", {"asr": ()})):
+        lib, models = _speech_files(tmp_path / case.replace(" ", "_"), **kw)
+        assert fit_check.speech_setup(lib, models) == ([], None), case
+    assert fit_check.speech_setup(str(tmp_path / "gone"), str(tmp_path / "gone")) == ([], None)
+
+
+def test_the_check_and_the_retime_pass_vad_and_its_files_to_tsubasa_and_nothing_without_them(tmp_path, monkeypatch):
+    seen = []
+
+    def run(command, timeout, *env):
+        seen.append((command, env))
+        return (json.dumps(_answer()) + "\n").encode()
+    monkeypatch.setattr(fit_check, "_run", run)
+    monkeypatch.setattr(fit_check, "speech_setup", lambda: (["--vad"], {"TSUBASA_WHISPER": "w"}))
+    assert fit_check.check(None, VIDEO, SUBTITLE, tsubasa="tsubasa")[0] == fit_check.TIMED
+    fit_check.retime(VIDEO, SUBTITLE, str(tmp_path / "out"), tsubasa="tsubasa")
+    assert [c[-1] for c, _e in seen] == ["--vad", "--vad"]
+    assert [e for _c, e in seen] == [({"TSUBASA_WHISPER": "w"},)] * 2
+    seen.clear()
+    monkeypatch.setattr(fit_check, "speech_setup", lambda: ([], None))
+    fit_check.check(None, VIDEO, SUBTITLE, tsubasa="tsubasa")
+    assert seen == [(["tsubasa", "--pair", VIDEO, SUBTITLE, "--dry-run", "--json", "--no-results"], ())]

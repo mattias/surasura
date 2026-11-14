@@ -77,6 +77,34 @@ def version(pairing):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+# RUNBOOK B6 (Tsubasa-sync #4, based on Mattias's Dr. Stone Stone Wars: BD rips with no subtitle track): tsubasa's
+# `--vad` times a subtitle against the speech in the video's own audio — Silero VAD for when, a whisper model for what
+# is said. Its files are found, never bundled: Anki Miner's whisper.cpp and the two ggml models Anki Miner keeps
+SPEECH_LIBRARY = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "AnkiMiner", "_internal")
+SPEECH_MODELS = os.path.join(os.path.expanduser("~"), ".anki_miner", "asr_models", "ggml")
+
+
+def speech_setup(library=None, models=None):
+    """`(["--vad"], env)` for tsubasa when whisper.cpp (`whisper.dll`) and both models (`ggml-silero-*.bin`, another
+    `ggml-*.bin`) are on this PC — the environment tsubasa reads them from (`TSUBASA_WHISPER`, `TSUBASA_VAD_MODEL`,
+    `TSUBASA_ASR_MODEL`) — else `([], None)`: tsubasa as before, a raw video refused."""
+    library = library or SPEECH_LIBRARY
+    models = models or SPEECH_MODELS
+    if not os.path.isfile(os.path.join(library, "whisper.dll" if sys.platform == "win32" else "libwhisper.so")):
+        return [], None
+    try:
+        names = sorted(os.listdir(models))
+    except OSError:
+        return [], None
+    vad = [n for n in names if n.startswith("ggml-silero") and n.endswith(".bin")]
+    asr = [n for n in names if n.startswith("ggml-") and n.endswith(".bin") and not n.startswith("ggml-silero")]
+    if not vad or not asr:
+        return [], None
+    env = dict(os.environ, TSUBASA_WHISPER=library, TSUBASA_VAD_MODEL=os.path.join(models, vad[-1]),
+               TSUBASA_ASR_MODEL=os.path.join(models, asr[0]))
+    return ["--vad"], env
+
+
 def find_tsubasa():
     """tsubasa's program: the one Surasura's bundle ships beside its own exe (frozen: `tsubasa.exe` beside
     `Surasura.exe` and `surasura-cli.exe`, sharing `_internal`; T1), else one on PATH (a developer's pip install), else
@@ -184,8 +212,9 @@ def fit(pairing, video, subtitle, tsubasa=None, run=None, timeout=TIMEOUT_S, tru
             return TIMED, "you", None, 0.0
         return NOT_TIMED, None, NO_CHECKER, 0.0
     command = [exe, "--pair", video, subtitle, "--dry-run", "--json", "--no-results"]
+    extra, env = speech_setup() if run is None else ([], None)
     try:
-        stdout = _run(command, timeout) if run is None else run(
+        stdout = (_run(command, timeout) if env is None else _run(command + extra, timeout, env)) if run is None else run(
             command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout).stdout
     except subprocess.TimeoutExpired:
         # no answer in time (a file read whole over a slow share or a slow disk): asked again — the hourglass says so
@@ -250,8 +279,9 @@ def retime(video, subtitle, out_dir, tsubasa=None, run=None, timeout=TIMEOUT_S):
     shutil.rmtree(out_dir, ignore_errors=True)
     os.makedirs(out_dir, exist_ok=True)
     command = [exe, "--pair", video, subtitle, "--out", out_dir, "--json", "--no-results"]
+    extra, env = speech_setup() if run is None else ([], None)
     try:
-        stdout = _run(command, timeout) if run is None else run(
+        stdout = (_run(command, timeout) if env is None else _run(command + extra, timeout, env)) if run is None else run(
             command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout).stdout
     except (subprocess.TimeoutExpired, OSError, subprocess.SubprocessError):
         return RETRY
@@ -315,11 +345,13 @@ def _span(seconds):
     return f"{seconds} second{'' if seconds == 1 else 's'}"
 
 
-def _run(command, timeout):
+def _run(command, timeout, env=None):
     """tsubasa's stdout, waited for in slices (row 56, `stopping.wait`): the job's *Stop* ends it within a second and
     raises `stopping.Stopped` (the job stops before its fit check); past `timeout` it is ended and TimeoutExpired
     raised (asked again)."""
     options = {"creationflags": CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+    if env is not None:
+        options["env"] = env
     proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             **options)
     try:
